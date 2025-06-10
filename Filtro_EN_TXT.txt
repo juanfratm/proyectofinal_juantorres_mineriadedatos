@@ -1,0 +1,202 @@
+#Filtro para el idioma que predomina en el dataset
+
+#Primero hacemos una exploracion rapida de la columna Comments para ver la tendencia de idiomas.
+#debido a la cantidad de datos  se toma una muestra aleatorea de 10000
+
+import pandas as pd
+import re 
+import os  
+import emoji
+import glob
+from langdetect import detect, detect_langs, DetectorFactory
+from langdetect.lang_detect_exception import LangDetectException
+
+#Función para detectar idioma 
+def detectar_idioma(texto):
+    try:
+        return detect(str(texto))
+    except:
+        return "desconocido"
+
+#Creamos una lista para guardar los idiomas que se detecten
+idiomas_detectados = []
+datos = pd.read_csv('Datos_Completos_finales.csv', usecols=['comments'], chunksize=100000) # Seleccionamos una parte del dataframe
+
+# Ciclo for para leer archivo por partes 
+for bloque in datos:
+    # Filtrar solo comentarios no nulos
+    bloque = bloque.dropna(subset=['comments'])
+
+    # Tomamos una pequeña muestra del bloque (10000 filas)
+    muestra = bloque.sample(n=10000, random_state=42)
+
+    # Usamos la funcion para detectar el idioma en la muestra
+    muestra['idioma'] = muestra['comments'].apply(detectar_idioma)
+
+    # Agregamos los idiomas detectados a la lista creada arriba
+    idiomas_detectados.extend(muestra['idioma'].tolist())
+
+    # Detenemos después de cierto número de muestras
+    if len(idiomas_detectados) >= 10000:
+        break
+
+# creamos un DataFrame con los idiomas detectados
+df_idiomas = pd.DataFrame(idiomas_detectados, columns=['idioma'])
+
+# colocamos un contador de idiomas detectados
+conteo = df_idiomas['idioma'].value_counts()
+
+# Mostrarmos resultados
+print("Idiomas detectados:")
+print(conteo)
+
+#Filtrado del idioma predominante
+
+# Se fija seed aleatoria para garantizar reproducibilidad en los resultados de la función de detección de idioma
+DetectorFactory.seed = 0
+
+#Creamos una funcion para limpiar el texto de emojis, de etiquetas html, espacios, simbolos y signos especiales
+#Realizamos esto para facilitar la deteccion del idioma, no eliminamos las puntuaciones basicas.
+def limpiar_texto(texto):
+    if not isinstance(texto, str):
+        # Si el texto no es string, devolvemos cadena vacía para evitar errores
+        return ""
+    # Eliminamos emojis modernos
+    texto = emoji.replace_emoji(texto, replace='')
+
+    # Eliminamos emojis unicode extendidos con expresión regular
+    texto = re.sub(
+        "[" 
+        "\U0001F600-\U0001F64F"  # Caritas
+        "\U0001F300-\U0001F5FF"  # Símbolos y pictogramas
+        "\U0001F680-\U0001F6FF"  # Transporte y símbolos varios
+        "\U0001F1E0-\U0001F1FF"  # Banderas
+        "\U00002700-\U000027BF"  # Flechas, corazones y otros
+        "\U0001F900-\U0001F9FF"  # Emojis recientes
+        "\U0001FA70-\U0001FAFF"  # Más emojis modernos
+        "\U00002600-\U000026FF"  # Símbolos varios
+        "\U000024C2-\U0001F251"  # Otros símbolos
+        "]+", "", texto)
+
+    # Eliminamos emoticones de texto comunes como :) :( :D :-P etc.
+    texto = re.sub(r'(:|;|=|8|x|X)[\-~]?[)(DPpOo3/\\|]+', '', texto)
+
+    # Eliminamos patrones de caracteres repetidos tipo ^^^ o ---  que son innecesarios
+    texto = re.sub(r'[\^><\-_=]{2,}', '', texto)
+
+    # Reemplazamos las etiquetas HTML específicas <br> y <br/> por espacio
+    texto = re.sub(r'<br\s*/?>', ' ', texto, flags=re.IGNORECASE)
+
+    # Eliminamos otras etiquetas HTML generales <i>, <b>, etc.
+    texto = re.sub(r'<[^>]+>', '', texto)
+
+    # Eliminamos símbolos especiales
+    texto = re.sub(r'[{}\[\]*#^|~=`+<>]', '', texto)
+
+    # Reemplazamos múltiples espacios seguidos por uno solo
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto.strip()
+
+#Ahora creamos una funcion para filtrar el idioma predominante o escogido
+def ingles(texto_limpio):
+    try:
+        # Detecta idiomas y sus probabilidades (usamos probabilidades porque al revisar un poco del dataset observamos que hay comentarios en spanglish)
+        idiomas = detect_langs(texto_limpio)
+
+        # Si hay dos idiomas y el segundo es mayor a 10%, no lo usamos porque está mezclado
+        if len(idiomas) > 1 and idiomas[1].prob > 0.10:
+            return False  # Texto mezclado, no se acepta
+
+        ## Si no es inglés o no estamos seguros (menos del 90%), lo rechazamos
+        if idiomas[0].lang != 'en' or idiomas[0].prob < 0.90:
+            return False
+
+        # Lista básica de palabras comunes en español para detectar mezcla, esto ayuda al detector
+        palabras_es = [
+            'muy', 'bueno', 'lugar', 'bonito', 'excelente',
+            'calle', 'comida', 'habitacion', 'gracias', 'centro',
+            'cerca', 'todo', 'nada', 'persona', 'amiga'
+        ]
+
+        # Recorremos palabras en español para verificar si aparecen en el texto
+        for palabra in palabras_es:
+            # Buscamos palabra como palabra completa
+            if f" {palabra} " in f" {texto_limpio.lower()} ":
+                return False  # Si contiene palabra en español, descartamos
+
+        # Si pasa todas las pruebas, devolvemos True
+        return True
+
+    except LangDetectException:
+        # Si no pudo detectar el idioma, rechazamos el texto
+        return False
+
+#Ahora que tenemos las funciones las aplicaremos al dataset previamnete generado en elcodigo principal
+#Aqui tambien vamos a analizar cada 100mil filas ya que sino realizamos la particion la computadora se congela
+archivo_csv = 'Datos_Completos_finales.csv' 
+columna_texto = 'comments'  
+tamaño_batch = 100000  
+carpeta_salida = 'Datos_filtrados_EN'  
+
+# Creamos la carpeta de salida para que no se mezclen los dataset, ya que son mas de 1 millon de datos para analizar, saldran al menos 10 batch
+os.makedirs(carpeta_salida, exist_ok=True)
+
+# Contador de batchs procesados
+batch_num = 0  
+
+# Ciclo for para procesar el dataframe por batch y filtrar los comentarios solo en ingles
+for chunk in pd.read_csv(archivo_csv, chunksize=tamaño_batch):
+    print(f"\nProcesando batch {batch_num + 1}...")
+
+    # Lista para almacenar filas filtradas
+    comentarios_en = []  
+
+    # Recorremos cada fila del batch actual
+    for _, fila in chunk.iterrows():
+        texto_original = str(fila[columna_texto])  # para obtener texto original
+        texto_limpio = limpiar_texto(texto_original)  # para limpiar el texto
+
+        # Ignoramos textos demasiado cortos para evitar ruido
+        if len(texto_limpio) < 20:
+            continue
+
+        # Verificar si el texto esta inglés según la función que hemos creado
+        if ingles(texto_limpio):
+            # Copiamos la fila para no modificar el original
+            fila_filtrada = fila.copy()
+            # Agregamos una columna extra con el texto limpio
+            fila_filtrada['comentario_limpio'] = texto_limpio
+            # Guardarmos la fila en lista de resultados
+            comentarios_en.append(fila_filtrada)
+
+    # Convertimos la lista de filas filtradas a DataFrame
+    df_filtrado = pd.DataFrame(comentarios_en)
+
+    #Nombre de los archivo de salida según el batch
+    nombre_archivo = f'{carpeta_salida}/comentarios_en_batch_{batch_num}.csv'
+
+    # Guardamos cada DataFrame
+    df_filtrado.to_csv(nombre_archivo, index=False)
+    print(f"Batch {batch_num + 1} guardado con {len(df_filtrado)} comentarios en inglés.")
+    
+    # Incrementarmos el contador para siguiente batch
+    batch_num += 1
+
+#ahora que se han generado los batch (proceso demora aprox 2horas en computadoras regulares) debemos hacerlo que sea un solo dataset para continuar con el proyecto
+# Seleccionamos la ruta de entrada (carpeta donde están los batches)
+carpeta_batches = 'Datos_filtrados_EN'
+
+# Buscar todos los archivos CSV que empiecen con comentarios_en_batch tal
+archivos = glob.glob(os.path.join(carpeta_batches, 'comentarios_en_batch_*.csv'))
+
+# Leemos todos los archivos en una lista de dataframes
+dataframes = [pd.read_csv(archivo) for archivo in archivos]
+
+# Unimos todos los dataframes
+df_final = pd.concat(dataframes, ignore_index=True)
+
+#Ruta de salida(fuera de la carpeta de datos_filtrados_en), colocamos el archivo donde esta el codigo 1
+archivo_salida = 'Archivo_Filtrado_EN.csv'
+df_final.to_csv(archivo_salida, index=False)
+
+print(f"Archivo final guardado como '{archivo_salida}' con {len(df_final)} comentarios.")
